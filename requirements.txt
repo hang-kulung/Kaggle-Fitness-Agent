@@ -4,3 +4,4 @@ pytest-asyncio==1.2.0
 sqlalchemy==2.0.4
 python-dotenv 
 aiosqlite==0.18.0
+streamlit

@@ -198,42 +198,35 @@ async def get_or_create_session(session_service):
     return session
 
 
-# ── main entry point ──────────────────────────────────────────────────────────
-async def main():
-    session_service = DatabaseSessionService(db_url=DB_URL)
-    memory_service  = StructuredMemoryService("memory")
+class WorkoutRuntime:
+    """Shared agent runtime used by both terminal and Streamlit interfaces."""
 
-    runner = Runner(
-        agent=workout_agent,
-        app_name=APP_NAME,
-        session_service=session_service,
-        memory_service=memory_service,
-    )
+    def __init__(self, runner, memory_service, session):
+        self.runner = runner
+        self.memory_service = memory_service
+        self.session = session
 
-    print("Workout Trainer Agent  |  type 'exit' to quit, 'save' to save memory\n")
+    @classmethod
+    async def create(cls):
+        session_service = DatabaseSessionService(db_url=DB_URL)
+        memory_service = StructuredMemoryService("memory")
 
-    session = await get_or_create_session(session_service)
-    print(f"Session: {session.id}\n")
+        runner = Runner(
+            agent=workout_agent,
+            app_name=APP_NAME,
+            session_service=session_service,
+            memory_service=memory_service,
+        )
 
-    while True:
-        user_input = input("You: ").strip()
-        if not user_input:
-            continue
+        session = await get_or_create_session(session_service)
+        return cls(runner=runner, memory_service=memory_service, session=session)
 
-        if user_input.lower() in ("exit", "quit"):
-            await memory_service.add_session_to_memory(session)
-            print("[Memory saved] Goodbye!")
-            break
+    async def send_message(self, user_input: str) -> str:
+        response_parts = []
 
-        if user_input.lower() == "save":
-            await memory_service.add_session_to_memory(session)
-            print("[Memory saved]")
-            continue
-
-        print("Agent: ", end="", flush=True)
-        async for event in runner.run_async(
+        async for event in self.runner.run_async(
             user_id=USER_ID,
-            session_id=session.id,
+            session_id=self.session.id,
             new_message=types.Content(
                 role="user",
                 parts=[types.Part(text=user_input)],
@@ -242,11 +235,48 @@ async def main():
             if event.is_final_response() and event.content:
                 for part in event.content.parts:
                     if part.text:
-                        print(part.text)
+                        response_parts.append(part.text)
 
-        session = await session_service.get_session(
-            app_name=APP_NAME, user_id=USER_ID, session_id=session.id
+        self.session = await self.runner.session_service.get_session(
+            app_name=APP_NAME,
+            user_id=USER_ID,
+            session_id=self.session.id,
         )
+        return "\n".join(response_parts).strip()
+
+    async def save_memory(self) -> None:
+        await self.memory_service.add_session_to_memory(self.session)
+
+
+async def create_workout_runtime() -> WorkoutRuntime:
+    return await WorkoutRuntime.create()
+
+
+# ── main entry point ──────────────────────────────────────────────────────────
+async def main():
+    print("Workout Trainer Agent  |  type 'exit' to quit, 'save' to save memory\n")
+
+    runtime = await create_workout_runtime()
+    print(f"Session: {runtime.session.id}\n")
+
+    while True:
+        user_input = input("You: ").strip()
+        if not user_input:
+            continue
+
+        if user_input.lower() in ("exit", "quit"):
+            await runtime.save_memory()
+            print("[Memory saved] Goodbye!")
+            break
+
+        if user_input.lower() == "save":
+            await runtime.save_memory()
+            print("[Memory saved]")
+            continue
+
+        print("Agent: ", end="", flush=True)
+        response = await runtime.send_message(user_input)
+        print(response)
 
 
 if __name__ == "__main__":
