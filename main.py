@@ -171,7 +171,8 @@ to record facts — NEVER rely on conversation history to remember user details.
 )
 
 # ── constants ─────────────────────────────────────────────────────────────────
-DB_URL   = "sqlite+aiosqlite:///workout_agent.db"
+# DB_URL   = "sqlite+aiosqlite:///workout_agent.db"
+DB_URL = "sqlite:///workout_agent.db"
 APP_NAME = "workout_app"
 USER_ID  = "user_001"
 
