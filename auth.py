@@ -3,7 +3,7 @@ import os
 import hashlib
 import secrets
 
-USERS_FILE = "users.json"
+USERS_FILE = os.path.join(os.environ.get("DATA_DIR", "."), "users.json")
 
 
 def _hash_password(password: str, salt: str) -> str:

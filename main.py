@@ -36,6 +36,9 @@ retry_config = types.HttpRetryOptions(
     http_status_codes=[429, 500, 503, 504],
 )
 
+# Use /app/data on Railway, local ./data otherwise
+DATA_DIR = os.environ.get("DATA_DIR", "data")
+
 # ── tool functions ────────────────────────────────────────────────────────────
 def get_current_date() -> dict:
     """
@@ -95,7 +98,7 @@ APP_NAME = "workout_app"
 # ── per-user path helpers ─────────────────────────────────────────────────────
 def get_user_paths(user_id: str) -> dict:
     """Return db and memory paths namespaced to this user."""
-    user_dir = os.path.join("data", user_id)
+    user_dir = os.path.join(DATA_DIR, user_id)
     memory_dir = os.path.join(user_dir, "memory")
     os.makedirs(memory_dir, exist_ok=True)
     return {
