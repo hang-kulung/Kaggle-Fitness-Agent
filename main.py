@@ -36,7 +36,7 @@ retry_config = types.HttpRetryOptions(
     http_status_codes=[429, 500, 503, 504],
 )
 
-# ── tools ─────────────────────────────────────────────────────────────────────
+# ── tool functions (defined at module level, wrapped inside create()) ─────────
 def get_current_date() -> dict:
     """
     Returns today's date and weekday.
@@ -45,7 +45,7 @@ def get_current_date() -> dict:
     Returns:
         current_date: YYYY-MM-DD string
         weekday: full name e.g. 'Monday'
-        weekday_index: 0=Monday … 6=Sunday
+        weekday_index: 0=Monday ... 6=Sunday
     """
     now = datetime.now()
     return {
@@ -53,8 +53,6 @@ def get_current_date() -> dict:
         "weekday":       now.strftime("%A"),
         "weekday_index": now.weekday(),
     }
-
-get_date_tool = FunctionTool(get_current_date)
 
 
 def web_search(query: str) -> str:
@@ -89,18 +87,58 @@ def web_search(query: str) -> str:
     except Exception as e:
         return f"Search failed: {e}"
 
-web_search_tool = FunctionTool(web_search)
 
-# ── agent ─────────────────────────────────────────────────────────────────────
-workout_agent = Agent(
-    name="workout_trainer_agent",
-    model=Gemini(
-        model="gemini-2.5-flash",
-        api_key=os.getenv("GOOGLE_API_KEY"),
-        retry_options=retry_config,
-    ),
-    description="Personal workout planner with memory of past sessions.",
-    instruction="""
+# ── constants ─────────────────────────────────────────────────────────────────
+DB_URL   = "sqlite:///workout_agent.db"
+APP_NAME = "workout_app"
+USER_ID  = "user_001"
+
+# ── session helpers ───────────────────────────────────────────────────────────
+async def get_or_create_session(session_service):
+    session_id_file = ".session_id"
+    if os.path.exists(session_id_file):
+        with open(session_id_file) as f:
+            sid = f.read().strip()
+        try:
+            session = await session_service.get_session(
+                app_name=APP_NAME, user_id=USER_ID, session_id=sid
+            )
+            if session:
+                return session
+        except Exception:
+            pass
+
+    session = await session_service.create_session(
+        app_name=APP_NAME, user_id=USER_ID
+    )
+    with open(session_id_file, "w") as f:
+        f.write(session.id)
+    return session
+
+
+class WorkoutRuntime:
+    """Shared agent runtime used by both terminal and Streamlit interfaces."""
+
+    def __init__(self, runner, memory_service, session):
+        self.runner = runner
+        self.memory_service = memory_service
+        self.session = session
+
+    @classmethod
+    async def create(cls):
+        # ── Build tools and agent HERE so aiohttp binds to the correct loop ──
+        get_date_tool   = FunctionTool(get_current_date)
+        web_search_tool = FunctionTool(web_search)
+
+        agent = Agent(
+            name="workout_trainer_agent",
+            model=Gemini(
+                model="gemini-2.5-flash",
+                api_key=os.getenv("GOOGLE_API_KEY"),
+                retry_options=retry_config,
+            ),
+            description="Personal workout planner with memory of past sessions.",
+            instruction="""
 You are a personal workout trainer agent. Your job is to create and manage
 a personalised 7-day workout plan and adapt it over time.
 
@@ -152,67 +190,27 @@ to record facts — NEVER rely on conversation history to remember user details.
   - Keep suggestions safe — recommend seeing a doctor for any pain.
   - Use web_search only when you need exercise technique or injury-safe alternatives.
 """,
-    tools=[
-        get_date_tool,
-        load_memory,
-        web_search_tool,
-        # plan tools
-        save_workout_plan_tool,
-        get_workout_plan_tool,
-        get_todays_workout_tool,
-        update_day_tool,
-        update_exercise_tool,
-        add_plan_note_tool,
-        # structured memory tools
-        update_user_profile_tool,
-        update_preferences_tool,
-        log_progress_tool,
-    ],
-)
+            tools=[
+                get_date_tool,
+                load_memory,
+                web_search_tool,
+                save_workout_plan_tool,
+                get_workout_plan_tool,
+                get_todays_workout_tool,
+                update_day_tool,
+                update_exercise_tool,
+                add_plan_note_tool,
+                update_user_profile_tool,
+                update_preferences_tool,
+                log_progress_tool,
+            ],
+        )
 
-# ── constants ─────────────────────────────────────────────────────────────────
-DB_URL   = "sqlite+aiosqlite:///workout_agent.db"
-APP_NAME = "workout_app"
-USER_ID  = "user_001"
-
-# ── session helpers ───────────────────────────────────────────────────────────
-async def get_or_create_session(session_service):
-    session_id_file = ".session_id"
-    if os.path.exists(session_id_file):
-        with open(session_id_file) as f:
-            sid = f.read().strip()
-        try:
-            session = await session_service.get_session(
-                app_name=APP_NAME, user_id=USER_ID, session_id=sid
-            )
-            if session:
-                return session
-        except Exception:
-            pass
-
-    session = await session_service.create_session(
-        app_name=APP_NAME, user_id=USER_ID
-    )
-    with open(session_id_file, "w") as f:
-        f.write(session.id)
-    return session
-
-
-class WorkoutRuntime:
-    """Shared agent runtime used by both terminal and Streamlit interfaces."""
-
-    def __init__(self, runner, memory_service, session):
-        self.runner = runner
-        self.memory_service = memory_service
-        self.session = session
-
-    @classmethod
-    async def create(cls):
         session_service = DatabaseSessionService(db_url=DB_URL)
-        memory_service = StructuredMemoryService("memory")
+        memory_service  = StructuredMemoryService("memory")
 
         runner = Runner(
-            agent=workout_agent,
+            agent=agent,
             app_name=APP_NAME,
             session_service=session_service,
             memory_service=memory_service,
