@@ -1,11 +1,10 @@
 import asyncio
 import threading
 import streamlit as st
+from auth import register_user, login_user
 from main import create_workout_runtime
 
 # ── Persistent background event loop ─────────────────────────────────────────
-# A single dedicated thread runs the event loop for the entire process lifetime.
-# This ensures aiohttp and all async objects always bind to the same loop.
 _loop: asyncio.AbstractEventLoop | None = None
 _loop_thread: threading.Thread | None = None
 _loop_lock = threading.Lock()
@@ -26,40 +25,113 @@ def run_async(coro):
     return asyncio.run_coroutine_threadsafe(coro, get_loop()).result(timeout=120)
 
 
-# ── Runtime stored at MODULE level ────────────────────────────────────────────
-# Module-level storage survives Streamlit reruns (unlike st.session_state which
-# can be recreated), ensuring the runtime and its aiohttp session always live
-# on the same background loop.
-_runtime = None
-_runtime_lock = threading.Lock()
+# ── Per-user runtime registry (module-level) ──────────────────────────────────
+# Keyed by username. Lives for the lifetime of the server process so aiohttp
+# sessions always stay bound to the same background event loop.
+_runtimes: dict = {}
+_runtimes_lock = threading.Lock()
 
 
-def get_runtime():
-    global _runtime
-    with _runtime_lock:
-        if _runtime is None:
-            _runtime = run_async(create_workout_runtime())
-    return _runtime
+def get_runtime(user_id: str, api_key: str):
+    with _runtimes_lock:
+        if user_id not in _runtimes:
+            _runtimes[user_id] = run_async(
+                create_workout_runtime(user_id=user_id, api_key=api_key)
+            )
+    return _runtimes[user_id]
 
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Workout Trainer Agent", page_icon="💪")
+
+# ── Session state defaults ────────────────────────────────────────────────────
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "username" not in st.session_state:
+    st.session_state.username = ""
+if "api_key" not in st.session_state:
+    st.session_state.api_key = ""
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "auth_mode" not in st.session_state:
+    st.session_state.auth_mode = "Login"   # or "Register"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AUTH SCREEN
+# ══════════════════════════════════════════════════════════════════════════════
+if not st.session_state.logged_in:
+    st.title("💪 Workout Trainer Agent")
+    st.subheader("Welcome! Please log in or create an account.")
+
+    # Toggle between Login / Register
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Login", use_container_width=True):
+            st.session_state.auth_mode = "Login"
+    with col2:
+        if st.button("Register", use_container_width=True):
+            st.session_state.auth_mode = "Register"
+
+    st.divider()
+    mode = st.session_state.auth_mode
+    st.markdown(f"### {mode}")
+
+    with st.form("auth_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        api_key  = st.text_input(
+            "Google API Key",
+            type="password",
+            help="Your Gemini API key from https://aistudio.google.com/app/apikey",
+        )
+        submitted = st.form_submit_button(mode, use_container_width=True)
+
+    if submitted:
+        if not api_key.strip():
+            st.error("Please enter your Google API key.")
+        else:
+            if mode == "Register":
+                success, msg = register_user(username, password)
+                if success:
+                    st.success(msg + " You can now log in.")
+                    st.session_state.auth_mode = "Login"
+                    st.rerun()
+                else:
+                    st.error(msg)
+            else:
+                success, msg = login_user(username, password)
+                if success:
+                    st.session_state.logged_in = True
+                    st.session_state.username  = username.strip().lower()
+                    st.session_state.api_key   = api_key.strip()
+                    st.session_state.messages  = [
+                        {
+                            "role": "assistant",
+                            "content": f"Hi {username}! Tell me what you want to train today, or ask for today's workout.",
+                        }
+                    ]
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+    st.stop()   # Don't render anything below while logged out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN APP (only reached when logged in)
+# ══════════════════════════════════════════════════════════════════════════════
 st.title("💪 Workout Trainer Agent")
 
-# ── Init chat history ─────────────────────────────────────────────────────────
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {
-            "role": "assistant",
-            "content": "Hi! Tell me what you want to train today, or ask for today's workout.",
-        }
-    ]
-
-# ── Init runtime once ─────────────────────────────────────────────────────────
-runtime = get_runtime()
+# Load (or create) this user's runtime
+runtime = get_runtime(
+    user_id=st.session_state.username,
+    api_key=st.session_state.api_key,
+)
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
+    st.markdown(f"👤 **{st.session_state.username}**")
     st.caption(f"Session: {runtime.session.id}")
 
     if st.button("Save memory", use_container_width=True):
@@ -71,9 +143,20 @@ with st.sidebar:
         st.rerun()
 
     if st.button("New session", use_container_width=True):
-        # global _runtime
-        _runtime = None          # force recreate on next get_runtime()
+        with _runtimes_lock:
+            _runtimes.pop(st.session_state.username, None)
         st.session_state.messages = []
+        st.rerun()
+
+    st.divider()
+
+    if st.button("Logout", use_container_width=True):
+        # Save memory before logging out
+        run_async(runtime.save_memory())
+        st.session_state.logged_in = False
+        st.session_state.username  = ""
+        st.session_state.api_key   = ""
+        st.session_state.messages  = []
         st.rerun()
 
 # ── Chat history ──────────────────────────────────────────────────────────────

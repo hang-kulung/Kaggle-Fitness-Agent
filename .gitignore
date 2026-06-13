@@ -16,3 +16,4 @@ env/
 wAgentenv/
 memory/
 *json
+data/

@@ -36,7 +36,7 @@ retry_config = types.HttpRetryOptions(
     http_status_codes=[429, 500, 503, 504],
 )
 
-# ── tool functions (defined at module level, wrapped inside create()) ─────────
+# ── tool functions ────────────────────────────────────────────────────────────
 def get_current_date() -> dict:
     """
     Returns today's date and weekday.
@@ -89,19 +89,30 @@ def web_search(query: str) -> str:
 
 
 # ── constants ─────────────────────────────────────────────────────────────────
-DB_URL   = "sqlite:///workout_agent.db"
 APP_NAME = "workout_app"
-USER_ID  = "user_001"
+
+
+# ── per-user path helpers ─────────────────────────────────────────────────────
+def get_user_paths(user_id: str) -> dict:
+    """Return db and memory paths namespaced to this user."""
+    user_dir = os.path.join("data", user_id)
+    memory_dir = os.path.join(user_dir, "memory")
+    os.makedirs(memory_dir, exist_ok=True)
+    return {
+        "db_url":          f"sqlite:///{user_dir}/workout_agent.db",
+        "memory_dir":      memory_dir,
+        "session_id_file": os.path.join(user_dir, ".session_id"),
+    }
+
 
 # ── session helpers ───────────────────────────────────────────────────────────
-async def get_or_create_session(session_service):
-    session_id_file = ".session_id"
+async def get_or_create_session(session_service, user_id: str, session_id_file: str):
     if os.path.exists(session_id_file):
         with open(session_id_file) as f:
             sid = f.read().strip()
         try:
             session = await session_service.get_session(
-                app_name=APP_NAME, user_id=USER_ID, session_id=sid
+                app_name=APP_NAME, user_id=user_id, session_id=sid
             )
             if session:
                 return session
@@ -109,7 +120,7 @@ async def get_or_create_session(session_service):
             pass
 
     session = await session_service.create_session(
-        app_name=APP_NAME, user_id=USER_ID
+        app_name=APP_NAME, user_id=user_id
     )
     with open(session_id_file, "w") as f:
         f.write(session.id)
@@ -117,24 +128,28 @@ async def get_or_create_session(session_service):
 
 
 class WorkoutRuntime:
-    """Shared agent runtime used by both terminal and Streamlit interfaces."""
+    """Shared agent runtime — one instance per logged-in user."""
 
-    def __init__(self, runner, memory_service, session):
+    def __init__(self, runner, memory_service, session, user_id: str):
         self.runner = runner
         self.memory_service = memory_service
         self.session = session
+        self.user_id = user_id
 
     @classmethod
-    async def create(cls):
-        # ── Build tools and agent HERE so aiohttp binds to the correct loop ──
+    async def create(cls, user_id: str, api_key: str):
+        paths = get_user_paths(user_id)
+
+        # Build tools and agent inside create() so aiohttp binds
+        # to the correct event loop (avoids "Future attached to different loop")
         get_date_tool   = FunctionTool(get_current_date)
         web_search_tool = FunctionTool(web_search)
 
         agent = Agent(
             name="workout_trainer_agent",
             model=Gemini(
-                model="gemini-2.5-flash",
-                api_key=os.getenv("GOOGLE_API_KEY"),
+                model="gemini-2.0-flash",
+                api_key=api_key,
                 retry_options=retry_config,
             ),
             description="Personal workout planner with memory of past sessions.",
@@ -206,8 +221,8 @@ to record facts — NEVER rely on conversation history to remember user details.
             ],
         )
 
-        session_service = DatabaseSessionService(db_url=DB_URL)
-        memory_service  = StructuredMemoryService("memory")
+        session_service = DatabaseSessionService(db_url=paths["db_url"])
+        memory_service  = StructuredMemoryService(paths["memory_dir"])
 
         runner = Runner(
             agent=agent,
@@ -216,14 +231,21 @@ to record facts — NEVER rely on conversation history to remember user details.
             memory_service=memory_service,
         )
 
-        session = await get_or_create_session(session_service)
-        return cls(runner=runner, memory_service=memory_service, session=session)
+        session = await get_or_create_session(
+            session_service, user_id, paths["session_id_file"]
+        )
+        return cls(
+            runner=runner,
+            memory_service=memory_service,
+            session=session,
+            user_id=user_id,
+        )
 
     async def send_message(self, user_input: str) -> str:
         response_parts = []
 
         async for event in self.runner.run_async(
-            user_id=USER_ID,
+            user_id=self.user_id,
             session_id=self.session.id,
             new_message=types.Content(
                 role="user",
@@ -237,7 +259,7 @@ to record facts — NEVER rely on conversation history to remember user details.
 
         self.session = await self.runner.session_service.get_session(
             app_name=APP_NAME,
-            user_id=USER_ID,
+            user_id=self.user_id,
             session_id=self.session.id,
         )
         return "\n".join(response_parts).strip()
@@ -246,16 +268,19 @@ to record facts — NEVER rely on conversation history to remember user details.
         await self.memory_service.add_session_to_memory(self.session)
 
 
-async def create_workout_runtime() -> WorkoutRuntime:
-    return await WorkoutRuntime.create()
+async def create_workout_runtime(user_id: str, api_key: str) -> WorkoutRuntime:
+    return await WorkoutRuntime.create(user_id=user_id, api_key=api_key)
 
 
-# ── main entry point ──────────────────────────────────────────────────────────
+# ── terminal entry point ──────────────────────────────────────────────────────
 async def main():
     print("Workout Trainer Agent  |  type 'exit' to quit, 'save' to save memory\n")
 
-    runtime = await create_workout_runtime()
-    print(f"Session: {runtime.session.id}\n")
+    user_id = input("Username: ").strip().lower()
+    api_key = input("Google API Key: ").strip()
+
+    runtime = await create_workout_runtime(user_id=user_id, api_key=api_key)
+    print(f"\nSession: {runtime.session.id}\n")
 
     while True:
         user_input = input("You: ").strip()
