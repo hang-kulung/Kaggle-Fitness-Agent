@@ -5,7 +5,7 @@ __pycache__
 *.db
 *.sqlite3
 *.log
-*.env
+.env
 *.venv
 venv/
 env/
@@ -15,5 +15,6 @@ env/
 .session_id
 wAgentenv/
 memory/
-*json
 data/
+users.json
+workout_plan.json

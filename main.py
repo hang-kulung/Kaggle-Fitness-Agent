@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -14,30 +15,21 @@ from googlesearch import search as gsearch
 import requests
 from bs4 import BeautifulSoup
 
-from plan_manager import (
-    save_workout_plan_tool,
-    get_workout_plan_tool,
-    get_todays_workout_tool,
-    update_day_tool,
-    update_exercise_tool,
-    add_plan_note_tool,
-    update_user_profile_tool,
-    update_preferences_tool,
-    log_progress_tool,
-)
+from plan_manager import create_workout_tools
+from storage_config import get_data_dir
 
 load_dotenv()
 
 # ── retry config ──────────────────────────────────────────────────────────────
 retry_config = types.HttpRetryOptions(
-    attempts=5,
+    attempts=2,
     exp_base=2,
     initial_delay=1,
-    http_status_codes=[429, 500, 503, 504],
+    http_status_codes=[500, 503, 504],
 )
 
-# Use /app/data on Railway, local ./data otherwise
-DATA_DIR = os.environ.get("DATA_DIR", "data")
+# Use configured DATA_DIR when writable, local ./data otherwise.
+DATA_DIR = get_data_dir()
 
 # ── tool functions ────────────────────────────────────────────────────────────
 def get_current_date() -> dict:
@@ -93,17 +85,25 @@ def web_search(query: str) -> str:
 
 # ── constants ─────────────────────────────────────────────────────────────────
 APP_NAME = "workout_app"
+USERNAME_RE = re.compile(r"^[a-z0-9_-]{3,32}$")
 
 
 # ── per-user path helpers ─────────────────────────────────────────────────────
 def get_user_paths(user_id: str) -> dict:
     """Return db and memory paths namespaced to this user."""
+    if not USERNAME_RE.fullmatch(user_id):
+        raise ValueError(
+            "Username must be 3-32 characters using lowercase letters, "
+            "numbers, underscores, or hyphens."
+        )
     user_dir = os.path.join(DATA_DIR, user_id)
     memory_dir = os.path.join(user_dir, "memory")
+    os.makedirs(user_dir, exist_ok=True)
     os.makedirs(memory_dir, exist_ok=True)
     return {
         "db_url":          f"sqlite:///{user_dir}/workout_agent.db",
         "memory_dir":      memory_dir,
+        "plan_file":       os.path.join(user_dir, "workout_plan.json"),
         "session_id_file": os.path.join(user_dir, ".session_id"),
     }
 
@@ -147,6 +147,10 @@ class WorkoutRuntime:
         # to the correct event loop (avoids "Future attached to different loop")
         get_date_tool   = FunctionTool(get_current_date)
         web_search_tool = FunctionTool(web_search)
+        workout_tools   = create_workout_tools(
+            plan_file=paths["plan_file"],
+            memory_dir=paths["memory_dir"],
+        )
 
         agent = Agent(
             name="workout_trainer_agent",
@@ -212,15 +216,7 @@ to record facts — NEVER rely on conversation history to remember user details.
                 get_date_tool,
                 load_memory,
                 web_search_tool,
-                save_workout_plan_tool,
-                get_workout_plan_tool,
-                get_todays_workout_tool,
-                update_day_tool,
-                update_exercise_tool,
-                add_plan_note_tool,
-                update_user_profile_tool,
-                update_preferences_tool,
-                log_progress_tool,
+                *workout_tools,
             ],
         )
 
@@ -247,28 +243,50 @@ to record facts — NEVER rely on conversation history to remember user details.
     async def send_message(self, user_input: str) -> str:
         response_parts = []
 
-        async for event in self.runner.run_async(
-            user_id=self.user_id,
-            session_id=self.session.id,
-            new_message=types.Content(
-                role="user",
-                parts=[types.Part(text=user_input)],
-            ),
-        ):
-            if event.is_final_response() and event.content:
-                for part in event.content.parts:
-                    if part.text:
-                        response_parts.append(part.text)
+        try:
+            async for event in self.runner.run_async(
+                user_id=self.user_id,
+                session_id=self.session.id,
+                new_message=types.Content(
+                    role="user",
+                    parts=[types.Part(text=user_input)],
+                ),
+            ):
+                if event.is_final_response() and event.content:
+                    for part in event.content.parts:
+                        if part.text:
+                            response_parts.append(part.text)
+        except Exception as exc:
+            return format_model_error(exc)
 
+        await self.refresh_session()
+        return "\n".join(response_parts).strip()
+
+    async def save_memory(self) -> None:
+        await self.memory_service.add_session_to_memory(self.session)
+
+    async def refresh_session(self) -> None:
         self.session = await self.runner.session_service.get_session(
             app_name=APP_NAME,
             user_id=self.user_id,
             session_id=self.session.id,
         )
-        return "\n".join(response_parts).strip()
 
-    async def save_memory(self) -> None:
-        await self.memory_service.add_session_to_memory(self.session)
+
+def format_model_error(exc: Exception) -> str:
+    error_text = str(exc)
+    if "RESOURCE_EXHAUSTED" in error_text or "429" in error_text:
+        return (
+            "Your Gemini API key has hit its current quota for this model. "
+            "Please wait and try again, use a different API key, or check the "
+            "quota/billing settings for the Google AI Studio project that owns this key."
+        )
+    if "API_KEY_INVALID" in error_text or "PERMISSION_DENIED" in error_text:
+        return (
+            "The Gemini API key was rejected. Please log out, log back in, "
+            "and enter a valid Google AI Studio API key."
+        )
+    return f"The model request failed: {exc}"
 
 
 async def create_workout_runtime(user_id: str, api_key: str) -> WorkoutRuntime:

@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import threading
 import streamlit as st
 from auth import register_user, login_user
@@ -32,13 +33,24 @@ _runtimes: dict = {}
 _runtimes_lock = threading.Lock()
 
 
+def get_runtime_key(user_id: str, api_key: str) -> tuple[str, str]:
+    api_key_fingerprint = hashlib.sha256(api_key.encode()).hexdigest()
+    return user_id, api_key_fingerprint
+
+
 def get_runtime(user_id: str, api_key: str):
+    runtime_key = get_runtime_key(user_id, api_key)
     with _runtimes_lock:
-        if user_id not in _runtimes:
-            _runtimes[user_id] = run_async(
+        if runtime_key not in _runtimes:
+            _runtimes[runtime_key] = run_async(
                 create_workout_runtime(user_id=user_id, api_key=api_key)
             )
-    return _runtimes[user_id]
+    return _runtimes[runtime_key]
+
+
+def drop_runtime(user_id: str, api_key: str) -> None:
+    with _runtimes_lock:
+        _runtimes.pop(get_runtime_key(user_id, api_key), None)
 
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -80,15 +92,17 @@ if not st.session_state.logged_in:
     with st.form("auth_form"):
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
-        api_key  = st.text_input(
-            "Google API Key",
-            type="password",
-            help="Your Gemini API key from https://aistudio.google.com/app/apikey",
-        )
+        api_key = ""
+        if mode == "Login":
+            api_key = st.text_input(
+                "Google API Key",
+                type="password",
+                help="Your Gemini API key from https://aistudio.google.com/app/apikey",
+            )
         submitted = st.form_submit_button(mode, use_container_width=True)
 
     if submitted:
-        if not api_key.strip():
+        if mode == "Login" and not api_key.strip():
             st.error("Please enter your Google API key.")
         else:
             if mode == "Register":
@@ -143,8 +157,7 @@ with st.sidebar:
         st.rerun()
 
     if st.button("New session", use_container_width=True):
-        with _runtimes_lock:
-            _runtimes.pop(st.session_state.username, None)
+        drop_runtime(st.session_state.username, st.session_state.api_key)
         st.session_state.messages = []
         st.rerun()
 
@@ -153,6 +166,7 @@ with st.sidebar:
     if st.button("Logout", use_container_width=True):
         # Save memory before logging out
         run_async(runtime.save_memory())
+        drop_runtime(st.session_state.username, st.session_state.api_key)
         st.session_state.logged_in = False
         st.session_state.username  = ""
         st.session_state.api_key   = ""
@@ -183,7 +197,10 @@ if submitted:
 
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                response = run_async(runtime.send_message(user_input))
+                try:
+                    response = run_async(runtime.send_message(user_input))
+                except Exception as exc:
+                    response = f"The request failed before the agent could respond: {exc}"
 
             if not response:
                 response = "I did not receive a final response. Please try again."

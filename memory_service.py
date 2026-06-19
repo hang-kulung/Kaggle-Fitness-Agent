@@ -24,18 +24,18 @@ from google.adk.sessions.session import Session
 from google.genai import types
 
 MAX_RECENT_EVENTS = 20          # ring-buffer hard cap
-DATA_DIR          = "memory"    # all structured files live here
+DEFAULT_DATA_DIR  = "memory"    # fallback for local direct use
 
 
 # ── low-level helpers ─────────────────────────────────────────────────────────
 
-def _path(filename: str) -> str:
-    return os.path.join(DATA_DIR, filename)
+def _path(data_dir: str, filename: str) -> str:
+    return os.path.join(data_dir, filename)
 
 
-def _read(filename: str, default):
+def _read(data_dir: str, filename: str, default):
     """Read a JSON file; return *default* on missing or corrupt file."""
-    p = _path(filename)
+    p = _path(data_dir, filename)
     if not os.path.exists(p):
         return default
     try:
@@ -45,12 +45,12 @@ def _read(filename: str, default):
         return default
 
 
-def _write(filename: str, data) -> None:
+def _write(data_dir: str, filename: str, data) -> None:
     """Atomic write: temp-file + os.replace to avoid partial-write corruption."""
-    os.makedirs(DATA_DIR, exist_ok=True)
-    p = _path(filename)
+    os.makedirs(data_dir, exist_ok=True)
+    p = _path(data_dir, filename)
     with tempfile.NamedTemporaryFile(
-        "w", dir=DATA_DIR, delete=False, suffix=".tmp"
+        "w", dir=data_dir, delete=False, suffix=".tmp"
     ) as tmp:
         json.dump(data, tmp, indent=2)
         tmp_path = tmp.name
@@ -92,17 +92,16 @@ class StructuredMemoryService(BaseMemoryService):
     Stores structured facts only; total disk footprint stays small.
     """
 
-    def __init__(self, data_dir: str = DATA_DIR):
-        global DATA_DIR
-        DATA_DIR = data_dir
-        os.makedirs(data_dir, exist_ok=True)
+    def __init__(self, data_dir: str = DEFAULT_DATA_DIR):
+        self.data_dir = data_dir
+        os.makedirs(self.data_dir, exist_ok=True)
         self._lock = asyncio.Lock()
 
     # ── write path ────────────────────────────────────────────────────────────
 
     async def add_session_to_memory(self, session: Session) -> None:
         async with self._lock:
-            events: list = _read("recent_events.json", default=[])
+            events: list = _read(self.data_dir, "recent_events.json", default=[])
 
             # dedup: skip sessions already ingested
             seen = {e.get("session_id") for e in events}
@@ -130,17 +129,17 @@ class StructuredMemoryService(BaseMemoryService):
 
             # ring-buffer: keep only the last MAX_RECENT_EVENTS entries
             combined = events + new_events
-            _write("recent_events.json", combined[-MAX_RECENT_EVENTS:])
+            _write(self.data_dir, "recent_events.json", combined[-MAX_RECENT_EVENTS:])
 
     # ── read path ─────────────────────────────────────────────────────────────
 
     async def search_memory(
         self, *, app_name: str, user_id: str, query: str
     ) -> SearchMemoryResponse:
-        profile     = _read("user_profile.json",  default={})
-        preferences = _read("preferences.json",   default={})
-        progress    = _read("progress_log.json",  default=[])
-        events      = _read("recent_events.json", default=[])
+        profile     = _read(self.data_dir, "user_profile.json",  default={})
+        preferences = _read(self.data_dir, "preferences.json",   default={})
+        progress    = _read(self.data_dir, "progress_log.json",  default=[])
+        events      = _read(self.data_dir, "recent_events.json", default=[])
 
         parts: list[str] = []
 
