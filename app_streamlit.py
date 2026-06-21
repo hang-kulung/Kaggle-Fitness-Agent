@@ -144,9 +144,18 @@ runtime = get_runtime(
 )
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
+# The only addition is the turn-count caption below the session ID.
+
 with st.sidebar:
     st.markdown(f"👤 **{st.session_state.username}**")
     st.caption(f"Session: {runtime.session.id}")
+
+    # Show how many turns are left before automatic session rotation.
+    # SESSION_ROTATION_TURNS is imported from main so it stays in sync.
+    from main import SESSION_ROTATION_TURNS
+    turns_used = runtime.turn_count
+    turns_left = SESSION_ROTATION_TURNS - turns_used
+    st.caption(f"Context: {turns_used}/{SESSION_ROTATION_TURNS} turns  ({turns_left} left)")
 
     if st.button("Save memory", use_container_width=True):
         run_async(runtime.save_memory())
@@ -164,7 +173,6 @@ with st.sidebar:
     st.divider()
 
     if st.button("Logout", use_container_width=True):
-        # Save memory before logging out
         run_async(runtime.save_memory())
         drop_runtime(st.session_state.username, st.session_state.api_key)
         st.session_state.logged_in = False

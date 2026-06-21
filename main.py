@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import time
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -22,14 +23,76 @@ load_dotenv()
 
 # ── retry config ──────────────────────────────────────────────────────────────
 retry_config = types.HttpRetryOptions(
-    attempts=2,
+    attempts=5,
     exp_base=2,
-    initial_delay=1,
-    http_status_codes=[500, 503, 504],
+    initial_delay=4,
+    http_status_codes=[429, 500, 503, 504],
 )
 
-# Use configured DATA_DIR when writable, local ./data otherwise.
+# How many user turns before we rotate to a fresh ADK session.
+SESSION_ROTATION_TURNS = 8
+
 DATA_DIR = get_data_dir()
+
+# ── RPM rate limiter ──────────────────────────────────────────────────────────
+# Free-tier Gemini Flash = 15 requests/minute.
+# Each agent turn fires: load_memory → get_workout_plan → get_current_date →
+# (maybe 2-3 more tool calls) → final model call = 5-6 API hits in < 1 second.
+# This limiter enforces a minimum gap between consecutive Gemini calls so we
+# never burst past the RPM ceiling regardless of what the agent decides to do.
+#
+# MIN_CALL_INTERVAL = 60s / 15 RPM = 4 s between calls (free tier)
+# Set to 0 if you have a paid key with higher quota.
+MIN_CALL_INTERVAL = 4.0   # seconds — reduce to 1.0 for paid keys
+
+_last_call_time: float = 0.0
+# NOTE: do NOT create asyncio.Lock() at module level — it binds to whichever
+# event loop is running at import time, which is wrong in Streamlit's
+# multi-loop setup. Instead we create it lazily inside the running loop.
+_rate_limit_lock: asyncio.Lock | None = None
+_rate_limit_lock_loop = None  # track which loop the lock belongs to
+
+
+def _get_rate_limit_lock() -> asyncio.Lock:
+    """Return a rate-limit lock that belongs to the current running loop."""
+    global _rate_limit_lock, _rate_limit_lock_loop
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    if _rate_limit_lock is None or _rate_limit_lock_loop is not current_loop:
+        _rate_limit_lock = asyncio.Lock()
+        _rate_limit_lock_loop = current_loop
+    return _rate_limit_lock
+
+
+async def _rate_limited_sleep() -> None:
+    """Sleep just long enough to stay under the RPM limit."""
+    global _last_call_time
+    lock = _get_rate_limit_lock()
+    async with lock:
+        now = time.monotonic()
+        wait = MIN_CALL_INTERVAL - (now - _last_call_time)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_call_time = time.monotonic()
+
+
+def rate_limited(fn):
+    """
+    Decorator that wraps a sync tool function with the RPM rate limiter.
+    The wrapper is async so ADK can await it; the inner fn stays sync.
+    """
+    async def wrapper(*args, **kwargs):
+        await _rate_limited_sleep()
+        # Use get_running_loop() — safe in both single and multi-loop setups
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
+    wrapper.__name__        = fn.__name__
+    wrapper.__doc__         = fn.__doc__
+    wrapper.__annotations__ = getattr(fn, "__annotations__", {})
+    return wrapper
+
 
 # ── tool functions ────────────────────────────────────────────────────────────
 def get_current_date() -> dict:
@@ -101,56 +164,55 @@ def get_user_paths(user_id: str) -> dict:
     os.makedirs(user_dir, exist_ok=True)
     os.makedirs(memory_dir, exist_ok=True)
     return {
-        "db_url":          f"sqlite:///{user_dir}/workout_agent.db",
-        "memory_dir":      memory_dir,
-        "plan_file":       os.path.join(user_dir, "workout_plan.json"),
-        "session_id_file": os.path.join(user_dir, ".session_id"),
+        "db_url":     f"sqlite:///{user_dir}/workout_agent.db",
+        "memory_dir": memory_dir,
+        "plan_file":  os.path.join(user_dir, "workout_plan.json"),
     }
 
 
 # ── session helpers ───────────────────────────────────────────────────────────
-async def get_or_create_session(session_service, user_id: str, session_id_file: str):
-    if os.path.exists(session_id_file):
-        with open(session_id_file) as f:
-            sid = f.read().strip()
-        try:
-            session = await session_service.get_session(
-                app_name=APP_NAME, user_id=user_id, session_id=sid
-            )
-            if session:
-                return session
-        except Exception:
-            pass
-
-    session = await session_service.create_session(
+async def create_new_session(session_service, user_id: str):
+    """Always creates a fresh ADK session (no file persistence)."""
+    return await session_service.create_session(
         app_name=APP_NAME, user_id=user_id
     )
-    with open(session_id_file, "w") as f:
-        f.write(session.id)
-    return session
+
+
+def _count_user_turns(session) -> int:
+    """Count how many user messages are in the current session."""
+    return sum(
+        1 for ev in (session.events or [])
+        if ev.content and ev.content.role == "user"
+    )
 
 
 class WorkoutRuntime:
     """Shared agent runtime — one instance per logged-in user."""
 
-    def __init__(self, runner, memory_service, session, user_id: str):
+    def __init__(self, runner, memory_service, session, user_id: str, session_service):
         self.runner = runner
         self.memory_service = memory_service
         self.session = session
         self.user_id = user_id
+        self._session_service = session_service
 
     @classmethod
     async def create(cls, user_id: str, api_key: str):
         paths = get_user_paths(user_id)
 
-        # Build tools and agent inside create() so aiohttp binds
-        # to the correct event loop (avoids "Future attached to different loop")
-        get_date_tool   = FunctionTool(get_current_date)
-        web_search_tool = FunctionTool(web_search)
-        workout_tools   = create_workout_tools(
+        # Wrap every tool with the rate limiter so no burst of tool calls
+        # can exceed MIN_CALL_INTERVAL between consecutive Gemini requests.
+        get_date_tool   = FunctionTool(rate_limited(get_current_date))
+        web_search_tool = FunctionTool(rate_limited(web_search))
+
+        # plan_manager tools are sync functions — wrap them too
+        raw_workout_tools = create_workout_tools(
             plan_file=paths["plan_file"],
             memory_dir=paths["memory_dir"],
         )
+        workout_tools = [
+            FunctionTool(rate_limited(ft.func)) for ft in raw_workout_tools
+        ]
 
         agent = Agent(
             name="workout_trainer_agent",
@@ -230,56 +292,92 @@ to record facts — NEVER rely on conversation history to remember user details.
             memory_service=memory_service,
         )
 
-        session = await get_or_create_session(
-            session_service, user_id, paths["session_id_file"]
-        )
+        session = await create_new_session(session_service, user_id)
         return cls(
             runner=runner,
             memory_service=memory_service,
             session=session,
             user_id=user_id,
+            session_service=session_service,
         )
 
+    async def _rotate_session_if_needed(self) -> None:
+        """
+        Save memory and start a fresh ADK session once the current one
+        exceeds SESSION_ROTATION_TURNS user turns, preventing context
+        window overflow on long Streamlit conversations.
+        """
+        if _count_user_turns(self.session) >= SESSION_ROTATION_TURNS:
+            await self.memory_service.add_session_to_memory(self.session)
+            self.session = await create_new_session(
+                self._session_service, self.user_id
+            )
+
     async def send_message(self, user_input: str) -> str:
-        response_parts = []
+        await self._rotate_session_if_needed()
 
-        try:
-            async for event in self.runner.run_async(
-                user_id=self.user_id,
-                session_id=self.session.id,
-                new_message=types.Content(
-                    role="user",
-                    parts=[types.Part(text=user_input)],
-                ),
-            ):
-                if event.is_final_response() and event.content:
-                    for part in event.content.parts:
-                        if part.text:
-                            response_parts.append(part.text)
-        except Exception as exc:
-            return format_model_error(exc)
+        # Retry loop — ADK's HttpRetryOptions doesn't catch quota errors
+        # returned in the response body, so we handle 429 / RESOURCE_EXHAUSTED
+        # ourselves with exponential backoff.
+        max_attempts = 5
+        backoff = 15  # seconds — free tier resets quota every 60s
 
-        await self.refresh_session()
-        return "\n".join(response_parts).strip()
+        for attempt in range(1, max_attempts + 1):
+            response_parts = []
+            try:
+                async for event in self.runner.run_async(
+                    user_id=self.user_id,
+                    session_id=self.session.id,
+                    new_message=types.Content(
+                        role="user",
+                        parts=[types.Part(text=user_input)],
+                    ),
+                ):
+                    if event.is_final_response() and event.content:
+                        for part in event.content.parts:
+                            if part.text:
+                                response_parts.append(part.text)
+
+                # Success — break out of retry loop
+                await self.refresh_session()
+                return "\n".join(response_parts).strip()
+
+            except Exception as exc:
+                err = str(exc)
+                is_quota = "RESOURCE_EXHAUSTED" in err or "429" in err
+                if is_quota and attempt < max_attempts:
+                    wait = backoff * attempt  # 15s, 30s, 45s, 60s
+                    await asyncio.sleep(wait)
+                    continue
+                return format_model_error(exc)
 
     async def save_memory(self) -> None:
         await self.memory_service.add_session_to_memory(self.session)
 
     async def refresh_session(self) -> None:
-        self.session = await self.runner.session_service.get_session(
+        self.session = await self._session_service.get_session(
             app_name=APP_NAME,
             user_id=self.user_id,
             session_id=self.session.id,
         )
+
+    @property
+    def turn_count(self) -> int:
+        """Current number of user turns in the active session."""
+        return _count_user_turns(self.session)
 
 
 def format_model_error(exc: Exception) -> str:
     error_text = str(exc)
     if "RESOURCE_EXHAUSTED" in error_text or "429" in error_text:
         return (
-            "Your Gemini API key has hit its current quota for this model. "
-            "Please wait and try again, use a different API key, or check the "
-            "quota/billing settings for the Google AI Studio project that owns this key."
+            "⚠️ **Gemini API quota exhausted** after retrying.\n\n"
+            "Free tier limits:\n"
+            "- **15 requests/minute** (RPM) — resets after 60 seconds\n"
+            "- **1,500 requests/day** (RPD) — resets at midnight Pacific time\n\n"
+            "If you've been testing heavily, you may have hit the daily limit. "
+            "Wait a minute and try again, or check your quota at "
+            "https://aistudio.google.com"
         )
     if "API_KEY_INVALID" in error_text or "PERMISSION_DENIED" in error_text:
         return (
@@ -321,6 +419,7 @@ async def main():
         print("Agent: ", end="", flush=True)
         response = await runtime.send_message(user_input)
         print(response)
+        print(f"  [turn {runtime.turn_count}/{SESSION_ROTATION_TURNS}]")
 
 
 if __name__ == "__main__":
