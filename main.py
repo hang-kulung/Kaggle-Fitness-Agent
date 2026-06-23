@@ -14,7 +14,13 @@ from googlesearch import search as gsearch
 import requests
 from bs4 import BeautifulSoup
 
+from user_auth import (
+    register_user,
+    login_user,
+    get_user_data_dir,
+)
 from plan_manager import (
+    set_user_context,
     save_workout_plan_tool,
     get_workout_plan_tool,
     get_todays_workout_tool,
@@ -156,14 +162,12 @@ to record facts — NEVER rely on conversation history to remember user details.
         get_date_tool,
         load_memory,
         web_search_tool,
-        # plan tools
         save_workout_plan_tool,
         get_workout_plan_tool,
         get_todays_workout_tool,
         update_day_tool,
         update_exercise_tool,
         add_plan_note_tool,
-        # structured memory tools
         update_user_profile_tool,
         update_preferences_tool,
         log_progress_tool,
@@ -171,20 +175,66 @@ to record facts — NEVER rely on conversation history to remember user details.
 )
 
 # ── constants ─────────────────────────────────────────────────────────────────
-# DB_URL   = "sqlite+aiosqlite:///workout_agent.db"
-DB_URL = "sqlite:///workout_agent.db"
-APP_NAME = "workout_app"
-USER_ID  = "user_001"
+DB_URL   = "sqlite:///workout_agent.db"
+APP_NAME = "agents"
+
+
+# ── auth flow ─────────────────────────────────────────────────────────────────
+
+def auth_menu() -> str:
+    """
+    Interactive login / register menu.
+    Returns the authenticated username.
+    """
+    print("\n╔══════════════════════════════╗")
+    print("║   Workout Trainer Agent      ║")
+    print("╚══════════════════════════════╝\n")
+
+    while True:
+        print("1. Login")
+        print("2. Register")
+        print("3. Exit")
+        choice = input("\nChoice: ").strip()
+
+        if choice == "3":
+            raise SystemExit(0)
+
+        username = input("Username: ").strip()
+        password = input("Password: ").strip()
+
+        if choice == "1":
+            ok, err = login_user(username, password)
+            if ok:
+                print(f"\n✓ Welcome back, {username}!\n")
+                return username
+            print(f"✗ {err}\n")
+
+        elif choice == "2":
+            ok, err = register_user(username, password)
+            if ok:
+                print(f"\n✓ Account created. Welcome, {username}!\n")
+                return username
+            print(f"✗ {err}\n")
+
+        else:
+            print("Please enter 1, 2, or 3.\n")
+
 
 # ── session helpers ───────────────────────────────────────────────────────────
-async def get_or_create_session(session_service):
-    session_id_file = ".session_id"
-    if os.path.exists(session_id_file):
-        with open(session_id_file) as f:
+
+def _session_id_file(user_data_dir: str) -> str:
+    return os.path.join(user_data_dir, ".session_id")
+
+
+async def get_or_create_session(session_service, user_id: str, user_data_dir: str):
+    sid_file = _session_id_file(user_data_dir)
+
+    if os.path.exists(sid_file):
+        with open(sid_file) as f:
             sid = f.read().strip()
         try:
             session = await session_service.get_session(
-                app_name=APP_NAME, user_id=USER_ID, session_id=sid
+                app_name=APP_NAME, user_id=user_id, session_id=sid
             )
             if session:
                 return session
@@ -192,17 +242,28 @@ async def get_or_create_session(session_service):
             pass
 
     session = await session_service.create_session(
-        app_name=APP_NAME, user_id=USER_ID
+        app_name=APP_NAME, user_id=user_id
     )
-    with open(session_id_file, "w") as f:
+    with open(sid_file, "w") as f:
         f.write(session.id)
     return session
 
 
 # ── main entry point ──────────────────────────────────────────────────────────
+
 async def main():
+    # 1. Authenticate
+    username = auth_menu()
+
+    # 2. Set per-user context
+    user_data_dir = get_user_data_dir(username)
+    memory_dir    = os.path.join(user_data_dir, "memory")
+
+    set_user_context(username)                       # plan_manager
+    memory_service = StructuredMemoryService(memory_dir)  # memory_service
+
+    # 3. Session service — shared DB, but isolated by user_id
     session_service = DatabaseSessionService(db_url=DB_URL)
-    memory_service  = StructuredMemoryService("memory")
 
     runner = Runner(
         agent=workout_agent,
@@ -211,9 +272,9 @@ async def main():
         memory_service=memory_service,
     )
 
-    print("Workout Trainer Agent  |  type 'exit' to quit, 'save' to save memory\n")
+    print("Type 'exit' to quit, 'save' to save memory\n")
 
-    session = await get_or_create_session(session_service)
+    session = await get_or_create_session(session_service, username, user_data_dir)
     print(f"Session: {session.id}\n")
 
     while True:
@@ -233,7 +294,7 @@ async def main():
 
         print("Agent: ", end="", flush=True)
         async for event in runner.run_async(
-            user_id=USER_ID,
+            user_id=username,
             session_id=session.id,
             new_message=types.Content(
                 role="user",
@@ -246,7 +307,7 @@ async def main():
                         print(part.text)
 
         session = await session_service.get_session(
-            app_name=APP_NAME, user_id=USER_ID, session_id=session.id
+            app_name=APP_NAME, user_id=username, session_id=session.id
         )
 
 

@@ -1,10 +1,10 @@
 """
 plan_manager.py  —  Workout plan tools + structured profile/preference/progress tools.
 
-Plan storage:  workout_plan.json  (unchanged)
-Profile storage: memory/user_profile.json
-Preferences:     memory/preferences.json
-Progress log:    memory/progress_log.json
+Plan storage:    data/{username}/workout_plan.json
+Profile storage: data/{username}/memory/user_profile.json
+Preferences:     data/{username}/memory/preferences.json
+Progress log:    data/{username}/memory/progress_log.json
 """
 
 import json
@@ -14,10 +14,23 @@ from datetime import datetime
 
 from google.adk.tools import FunctionTool
 
-# ── file paths ────────────────────────────────────────────────────────────────
+# ── user context ──────────────────────────────────────────────────────────────
 
-PLAN_FILE    = "workout_plan.json"
-MEMORY_DIR   = "memory"
+_current_user_dir: str | None = None
+PLAN_FILE  = "workout_plan.json"   # overridden by set_user_context
+MEMORY_DIR = "memory"              # overridden by set_user_context
+
+
+def set_user_context(username: str) -> None:
+    """
+    Point all plan-manager I/O at the given user's data directory.
+    Must be called once after login before any tool is used.
+    """
+    global _current_user_dir, PLAN_FILE, MEMORY_DIR
+    _current_user_dir = os.path.join("data", username)
+    PLAN_FILE  = os.path.join(_current_user_dir, "workout_plan.json")
+    MEMORY_DIR = os.path.join(_current_user_dir, "memory")
+    os.makedirs(MEMORY_DIR, exist_ok=True)
 
 
 # ── generic helpers ───────────────────────────────────────────────────────────
@@ -40,6 +53,7 @@ def _read_json(path: str, default):
 def _write_json(path: str, data) -> None:
     """Atomic write."""
     directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         "w", dir=directory, delete=False, suffix=".tmp"
     ) as tmp:
@@ -48,7 +62,7 @@ def _write_json(path: str, data) -> None:
     os.replace(tmp_path, path)
 
 
-# ── plan helpers (unchanged) ──────────────────────────────────────────────────
+# ── plan helpers ──────────────────────────────────────────────────────────────
 
 def _load_plan() -> dict:
     return _read_json(PLAN_FILE, default={})
@@ -59,7 +73,7 @@ def _save_plan(plan: dict) -> None:
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# PLAN TOOLS  (unchanged behaviour)
+# PLAN TOOLS
 # ════════════════════════════════════════════════════════════════════════════════
 
 def save_workout_plan(plan: dict) -> dict:
@@ -244,8 +258,7 @@ def add_plan_note(note: str) -> dict:
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# NEW: PROFILE / PREFERENCE / PROGRESS TOOLS
-# These write to memory/ so the memory service can surface them efficiently.
+# PROFILE / PREFERENCE / PROGRESS TOOLS
 # ════════════════════════════════════════════════════════════════════════════════
 
 def update_user_profile(updates: dict) -> dict:
@@ -254,18 +267,10 @@ def update_user_profile(updates: dict) -> dict:
     Call this when the user shares or changes: age, fitness level, equipment,
     injuries, or their primary goal.
 
-    This data is always injected into memory context at the start of each session,
-    so the agent never needs to re-ask for information already recorded here.
-
     Args:
         updates: Dict with any of:
             age (int), fitness_level (str), equipment (list[str]),
             injuries (list[str]), goal (str), notes (str)
-
-        Example:
-            {"age": 28, "fitness_level": "intermediate",
-             "equipment": ["dumbbells", "pull-up bar"],
-             "injuries": ["mild lower-back pain"], "goal": "muscle gain"}
 
     Returns:
         The full updated profile.
@@ -281,7 +286,6 @@ def update_user_profile(updates: dict) -> dict:
 def update_preferences(updates: dict) -> dict:
     """
     Record the user's workout preferences so future sessions respect them.
-    Call this when the user expresses likes, dislikes, or style preferences.
 
     Args:
         updates: Dict with any of:
@@ -290,18 +294,12 @@ def update_preferences(updates: dict) -> dict:
             rest_day_preference (list[str] — e.g. ["Sunday"]),
             notes (str)
 
-        Example:
-            {"liked_exercises": ["pull-ups", "deadlifts"],
-             "disliked_exercises": ["burpees"],
-             "preferred_workout_duration_minutes": 45}
-
     Returns:
         The full updated preferences dict.
     """
     p = _mem_path("preferences.json")
     prefs = _read_json(p, default={})
 
-    # Merge lists rather than overwrite them
     for list_key in ("liked_exercises", "disliked_exercises", "rest_day_preference"):
         if list_key in updates:
             existing = set(prefs.get(list_key, []))
@@ -317,13 +315,10 @@ def update_preferences(updates: dict) -> dict:
 def log_progress(entry: str) -> dict:
     """
     Append a permanent progress milestone — PRs, body-weight changes,
-    significant goal achievements.  Unlike recent_events (which is a
-    capped ring buffer), this log is kept forever but should only contain
-    genuinely significant milestones.
+    significant goal achievements.
 
     Args:
         entry: One-line description of the milestone.
-               Example: "Deadlifted 120 kg for the first time (5 reps)."
 
     Returns:
         Confirmation with the full progress log.
@@ -338,7 +333,7 @@ def log_progress(entry: str) -> dict:
     return {"status": "logged", "progress_log": log}
 
 
-# ── export everything as FunctionTools ────────────────────────────────────────
+# ── export as FunctionTools ───────────────────────────────────────────────────
 
 save_workout_plan_tool    = FunctionTool(save_workout_plan)
 get_workout_plan_tool     = FunctionTool(get_workout_plan)
@@ -346,8 +341,6 @@ get_todays_workout_tool   = FunctionTool(get_todays_workout)
 update_day_tool           = FunctionTool(update_day)
 update_exercise_tool      = FunctionTool(update_exercise)
 add_plan_note_tool        = FunctionTool(add_plan_note)
-
-# New tools
 update_user_profile_tool  = FunctionTool(update_user_profile)
 update_preferences_tool   = FunctionTool(update_preferences)
 log_progress_tool         = FunctionTool(log_progress)

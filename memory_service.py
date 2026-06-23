@@ -1,12 +1,11 @@
 """
 memory_service.py  —  Structured, bounded long-term memory.
 
-Files written under ./memory/
-  user_profile.json    – age, fitness level, equipment, injuries  (rarely changes)
+Files written under data/{username}/memory/
+  user_profile.json    – age, fitness level, equipment, injuries
   preferences.json     – liked/disliked exercises, difficulty prefs
   progress_log.json    – PRs and milestones  (append-only, small entries)
   recent_events.json   – ring-buffer of last MAX_RECENT_EVENTS notable facts
-
 """
 
 import asyncio
@@ -23,19 +22,17 @@ from google.adk.memory.base_memory_service import (
 from google.adk.sessions.session import Session
 from google.genai import types
 
-MAX_RECENT_EVENTS = 20          # ring-buffer hard cap
-DATA_DIR          = "memory"    # all structured files live here
+MAX_RECENT_EVENTS = 20
 
 
 # ── low-level helpers ─────────────────────────────────────────────────────────
 
-def _path(filename: str) -> str:
-    return os.path.join(DATA_DIR, filename)
+def _path(data_dir: str, filename: str) -> str:
+    return os.path.join(data_dir, filename)
 
 
-def _read(filename: str, default):
-    """Read a JSON file; return *default* on missing or corrupt file."""
-    p = _path(filename)
+def _read(data_dir: str, filename: str, default):
+    p = _path(data_dir, filename)
     if not os.path.exists(p):
         return default
     try:
@@ -45,12 +42,12 @@ def _read(filename: str, default):
         return default
 
 
-def _write(filename: str, data) -> None:
-    """Atomic write: temp-file + os.replace to avoid partial-write corruption."""
-    os.makedirs(DATA_DIR, exist_ok=True)
-    p = _path(filename)
+def _write(data_dir: str, filename: str, data) -> None:
+    """Atomic write: temp-file + os.replace."""
+    os.makedirs(data_dir, exist_ok=True)
+    p = _path(data_dir, filename)
     with tempfile.NamedTemporaryFile(
-        "w", dir=DATA_DIR, delete=False, suffix=".tmp"
+        "w", dir=data_dir, delete=False, suffix=".tmp"
     ) as tmp:
         json.dump(data, tmp, indent=2)
         tmp_path = tmp.name
@@ -70,11 +67,6 @@ _EVENT_RULES = [
 
 
 def _classify(text: str, role: str) -> dict | None:
-    """
-    Return a structured event dict if the agent message contains a notable fact,
-    else None.  We only index agent (model) messages — they summarise facts
-    cleanly; raw user messages are noisy and redundant.
-    """
     if role != "model":
         return None
     tl = text.lower()
@@ -88,13 +80,12 @@ def _classify(text: str, role: str) -> dict | None:
 
 class StructuredMemoryService(BaseMemoryService):
     """
-    Replaces JsonFileMemoryService.
-    Stores structured facts only; total disk footprint stays small.
+    Per-user structured memory service.
+    Pass the user's memory directory (data/{username}/memory) as data_dir.
     """
 
-    def __init__(self, data_dir: str = DATA_DIR):
-        global DATA_DIR
-        DATA_DIR = data_dir
+    def __init__(self, data_dir: str):
+        self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
         self._lock = asyncio.Lock()
 
@@ -102,9 +93,8 @@ class StructuredMemoryService(BaseMemoryService):
 
     async def add_session_to_memory(self, session: Session) -> None:
         async with self._lock:
-            events: list = _read("recent_events.json", default=[])
+            events: list = _read(self.data_dir, "recent_events.json", default=[])
 
-            # dedup: skip sessions already ingested
             seen = {e.get("session_id") for e in events}
             if session.id in seen:
                 return
@@ -128,31 +118,27 @@ class StructuredMemoryService(BaseMemoryService):
             if not new_events:
                 return
 
-            # ring-buffer: keep only the last MAX_RECENT_EVENTS entries
             combined = events + new_events
-            _write("recent_events.json", combined[-MAX_RECENT_EVENTS:])
+            _write(self.data_dir, "recent_events.json", combined[-MAX_RECENT_EVENTS:])
 
     # ── read path ─────────────────────────────────────────────────────────────
 
     async def search_memory(
         self, *, app_name: str, user_id: str, query: str
     ) -> SearchMemoryResponse:
-        profile     = _read("user_profile.json",  default={})
-        preferences = _read("preferences.json",   default={})
-        progress    = _read("progress_log.json",  default=[])
-        events      = _read("recent_events.json", default=[])
+        profile     = _read(self.data_dir, "user_profile.json",  default={})
+        preferences = _read(self.data_dir, "preferences.json",   default={})
+        progress    = _read(self.data_dir, "progress_log.json",  default=[])
+        events      = _read(self.data_dir, "recent_events.json", default=[])
 
         parts: list[str] = []
 
-        # 1. Always inject the user profile (small, always relevant)
         if profile:
             parts.append("## User profile\n" + json.dumps(profile, indent=2))
 
-        # 2. Preferences
         if preferences:
             parts.append("## Preferences\n" + json.dumps(preferences, indent=2))
 
-        # 3. Last 3 progress milestones
         if progress:
             recent_progress = progress[-3:]
             lines = "\n".join(
@@ -160,7 +146,6 @@ class StructuredMemoryService(BaseMemoryService):
             )
             parts.append(f"## Recent PRs / milestones\n{lines}")
 
-        # 4. Last 5 events (always)
         if events:
             last5 = events[-5:]
             lines = "\n".join(
@@ -168,7 +153,6 @@ class StructuredMemoryService(BaseMemoryService):
             )
             parts.append(f"## Recent events\n{lines}")
 
-        # 5. Query-matched events from the full ring buffer
         query_words = set(query.lower().split())
         matched = [
             e for e in events

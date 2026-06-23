@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Workout Trainer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    /* ── reset & tokens ─────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0f1117;
+      --surface:   #181c27;
+      --surface2:  #1e2335;
+      --border:    #2a3050;
+      --accent:    #5c7cfa;
+      --accent-dim:#3d5bd9;
+      --green:     #39d98a;
+      --text:      #e8eaf0;
+      --muted:     #7a8099;
+      --danger:    #f05555;
+      --radius:    12px;
+      --radius-sm: 8px;
+      --mono:      'JetBrains Mono', monospace;
+      --sans:      'Inter', system-ui, sans-serif;
+    }
+
+    body {
+      font-family: var(--sans);
+      background: var(--bg);
+      color: var(--text);
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── auth screen ────────────────────────────────────────────────── */
+    #auth-screen {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100dvh;
+      padding: 1.5rem;
+    }
+
+    .auth-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 2.5rem 2rem;
+      width: 100%;
+      max-width: 380px;
+    }
+
+    .auth-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 2rem;
+    }
+
+    .auth-logo-icon {
+      width: 36px;
+      height: 36px;
+      background: var(--accent);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+    }
+
+    .auth-logo-text {
+      font-size: 1.1rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+
+    .auth-logo-text span {
+      color: var(--muted);
+      font-weight: 400;
+    }
+
+    .tab-row {
+      display: flex;
+      gap: 4px;
+      background: var(--bg);
+      border-radius: var(--radius-sm);
+      padding: 4px;
+      margin-bottom: 1.75rem;
+    }
+
+    .tab-btn {
+      flex: 1;
+      padding: 0.45rem;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      font-family: var(--sans);
+      font-size: 0.875rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .tab-btn.active {
+      background: var(--surface2);
+      color: var(--text);
+    }
+
+    .field {
+      margin-bottom: 1rem;
+    }
+
+    label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: var(--muted);
+      margin-bottom: 0.4rem;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
+    input[type="text"],
+    input[type="password"] {
+      width: 100%;
+      padding: 0.65rem 0.85rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    input:focus {
+      border-color: var(--accent);
+    }
+
+    .btn-primary {
+      width: 100%;
+      padding: 0.7rem;
+      margin-top: 0.5rem;
+      background: var(--accent);
+      border: none;
+      border-radius: var(--radius-sm);
+      color: #fff;
+      font-family: var(--sans);
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, opacity 0.15s;
+    }
+
+    .btn-primary:hover   { background: var(--accent-dim); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .auth-error {
+      margin-top: 0.9rem;
+      padding: 0.6rem 0.85rem;
+      background: rgba(240, 85, 85, 0.1);
+      border: 1px solid rgba(240, 85, 85, 0.3);
+      border-radius: var(--radius-sm);
+      color: var(--danger);
+      font-size: 0.875rem;
+      display: none;
+    }
+
+    /* ── chat screen ────────────────────────────────────────────────── */
+    #chat-screen {
+      display: none;
+      flex-direction: column;
+      height: 100dvh;
+    }
+
+    /* header */
+    .chat-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.85rem 1.25rem;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .header-icon {
+      width: 30px;
+      height: 30px;
+      background: var(--accent);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+    }
+
+    .header-title {
+      font-weight: 600;
+      font-size: 0.95rem;
+      letter-spacing: -0.01em;
+    }
+
+    .header-sub {
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-top: 1px;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .user-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0.3rem 0.7rem;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 99px;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+
+    .user-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+    }
+
+    .logout-btn {
+      padding: 0.3rem 0.7rem;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--muted);
+      font-family: var(--sans);
+      font-size: 0.8rem;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+
+    .logout-btn:hover { border-color: var(--danger); color: var(--danger); }
+
+    /* messages */
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1.5rem 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+      scroll-behavior: smooth;
+    }
+
+    #messages::-webkit-scrollbar { width: 4px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+    .msg-row {
+      display: flex;
+      gap: 10px;
+      max-width: 780px;
+      width: 100%;
+      margin: 0 auto;
+    }
+
+    .msg-row.user { flex-direction: row-reverse; }
+
+    .avatar {
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+    }
+
+    .avatar.agent { background: var(--accent); }
+    .avatar.user  { background: var(--surface2); border: 1px solid var(--border); }
+
+    .bubble {
+      padding: 0.75rem 1rem;
+      border-radius: var(--radius);
+      font-size: 0.9rem;
+      line-height: 1.65;
+      max-width: calc(100% - 44px);
+    }
+
+    .bubble.agent {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-top-left-radius: 4px;
+    }
+
+    .bubble.user {
+      background: var(--accent);
+      color: #fff;
+      border-top-right-radius: 4px;
+    }
+
+    /* markdown-like rendering inside agent bubbles */
+    .bubble.agent strong { font-weight: 600; color: var(--text); }
+    .bubble.agent em     { font-style: italic; color: var(--muted); }
+
+    .bubble.agent code {
+      font-family: var(--mono);
+      font-size: 0.82em;
+      background: var(--bg);
+      padding: 0.15em 0.4em;
+      border-radius: 4px;
+      color: var(--green);
+    }
+
+    .bubble.agent pre {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 0.85rem;
+      overflow-x: auto;
+      margin-top: 0.5rem;
+      font-family: var(--mono);
+      font-size: 0.82em;
+      line-height: 1.6;
+      color: var(--text);
+    }
+
+    .bubble.agent pre code {
+      background: none;
+      padding: 0;
+      color: inherit;
+    }
+
+    .bubble.agent ul,
+    .bubble.agent ol {
+      padding-left: 1.25rem;
+      margin: 0.4rem 0;
+    }
+
+    .bubble.agent li { margin: 0.2rem 0; }
+
+    .bubble.agent h1,
+    .bubble.agent h2,
+    .bubble.agent h3 {
+      font-weight: 600;
+      margin: 0.6rem 0 0.3rem;
+      letter-spacing: -0.01em;
+    }
+
+    .bubble.agent h1 { font-size: 1rem; }
+    .bubble.agent h2 { font-size: 0.95rem; }
+    .bubble.agent h3 { font-size: 0.9rem; color: var(--muted); }
+
+    .bubble.agent p  { margin: 0.35rem 0; }
+    .bubble.agent p:first-child { margin-top: 0; }
+    .bubble.agent p:last-child  { margin-bottom: 0; }
+
+    .bubble.agent hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 0.6rem 0;
+    }
+
+    /* typing indicator */
+    .typing-dots {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+      padding: 0.4rem 0.2rem;
+    }
+
+    .typing-dots span {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--muted);
+      animation: dot-bounce 1.2s ease-in-out infinite;
+    }
+
+    .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes dot-bounce {
+      0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
+      30%            { transform: translateY(-5px); opacity: 1; }
+    }
+
+    /* empty state */
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      flex: 1;
+      gap: 0.75rem;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .empty-icon {
+      font-size: 2.5rem;
+      opacity: 0.5;
+    }
+
+    .empty-state h2 {
+      font-size: 1rem;
+      font-weight: 500;
+      color: var(--text);
+    }
+
+    .empty-state p {
+      font-size: 0.875rem;
+      max-width: 280px;
+      line-height: 1.6;
+    }
+
+    .suggestions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      justify-content: center;
+      margin-top: 0.5rem;
+    }
+
+    .suggestion-chip {
+      padding: 0.4rem 0.85rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 99px;
+      font-size: 0.8rem;
+      color: var(--muted);
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+
+    .suggestion-chip:hover { border-color: var(--accent); color: var(--text); }
+
+    /* input bar */
+    .input-bar {
+      padding: 0.85rem 1rem 1rem;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .input-inner {
+      display: flex;
+      align-items: flex-end;
+      gap: 0.6rem;
+      max-width: 780px;
+      margin: 0 auto;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 0.6rem 0.6rem 0.6rem 1rem;
+      transition: border-color 0.15s;
+    }
+
+    .input-inner:focus-within { border-color: var(--accent); }
+
+    #msg-input {
+      flex: 1;
+      background: none;
+      border: none;
+      outline: none;
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 0.9rem;
+      line-height: 1.5;
+      resize: none;
+      max-height: 140px;
+      overflow-y: auto;
+    }
+
+    #msg-input::placeholder { color: var(--muted); }
+
+    #send-btn {
+      width: 34px;
+      height: 34px;
+      flex-shrink: 0;
+      background: var(--accent);
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s, opacity 0.15s;
+    }
+
+    #send-btn:hover    { background: var(--accent-dim); }
+    #send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    #send-btn svg { width: 16px; height: 16px; }
+
+    .input-hint {
+      text-align: center;
+      font-size: 0.72rem;
+      color: var(--muted);
+      margin-top: 0.5rem;
+      opacity: 0.7;
+    }
+
+    /* ── utilities ──────────────────────────────────────────────────── */
+    .hidden { display: none !important; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .typing-dots span { animation: none; opacity: 0.5; }
+    }
+
+    @media (max-width: 500px) {
+      .auth-card { padding: 1.75rem 1.25rem; }
+      .header-sub { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── AUTH SCREEN ───────────────────────────────────────────────────────── -->
+<div id="auth-screen">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <div class="auth-logo-icon">💪</div>
+      <div class="auth-logo-text">Workout Trainer <span>Agent</span></div>
+    </div>
+
+    <div class="tab-row">
+      <button class="tab-btn active" id="tab-login"    onclick="switchTab('login')">Login</button>
+      <button class="tab-btn"       id="tab-register"  onclick="switchTab('register')">Register</button>
+    </div>
+
+    <div class="field">
+      <label for="auth-username">Username</label>
+      <input type="text" id="auth-username" placeholder="your_username" autocomplete="username" />
+    </div>
+    <div class="field">
+      <label for="auth-password">Password</label>
+      <input type="password" id="auth-password" placeholder="••••••••" autocomplete="current-password" />
+    </div>
+
+    <button class="btn-primary" id="auth-submit-btn" onclick="handleAuth()">Login</button>
+    <div class="auth-error" id="auth-error"></div>
+  </div>
+</div>
+
+<!-- ── CHAT SCREEN ───────────────────────────────────────────────────────── -->
+<div id="chat-screen">
+
+  <header class="chat-header">
+    <div class="header-left">
+      <div class="header-icon">💪</div>
+      <div>
+        <div class="header-title">Workout Trainer</div>
+        <div class="header-sub">Personal AI coach</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="user-pill">
+        <span class="user-dot"></span>
+        <span id="username-label">—</span>
+      </div>
+      <button class="logout-btn" onclick="logout()">Logout</button>
+    </div>
+  </header>
+
+  <div id="messages">
+    <div class="empty-state" id="empty-state">
+      <div class="empty-icon">🏋️</div>
+      <h2>Ready when you are</h2>
+      <p>Tell me about your fitness goals and I'll build a personalised 7-day workout plan.</p>
+      <div class="suggestions">
+        <button class="suggestion-chip" onclick="sendSuggestion(this)">Start my first plan</button>
+        <button class="suggestion-chip" onclick="sendSuggestion(this)">Show today's workout</button>
+        <button class="suggestion-chip" onclick="sendSuggestion(this)">I hit a new PR today</button>
+        <button class="suggestion-chip" onclick="sendSuggestion(this)">Modify my plan</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="input-bar">
+    <div class="input-inner">
+      <textarea
+        id="msg-input"
+        rows="1"
+        placeholder="Message your trainer…"
+        onkeydown="handleKey(event)"
+        oninput="autoResize(this)"
+      ></textarea>
+      <button id="send-btn" onclick="sendMessage()" aria-label="Send">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"></line>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+        </svg>
+      </button>
+    </div>
+    <p class="input-hint">Enter to send · Shift+Enter for new line</p>
+  </div>
+</div>
+
+<script src="chat.js"></script>
+</body>
+</html>
